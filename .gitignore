@@ -6,6 +6,9 @@
 # Dependencies
 node_modules/
 
+# Uploaded photos (local photo storage; user data, never committed)
+backend/uploads/
+
 # Build files
 dist/
 build/
