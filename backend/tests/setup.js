@@ -10,6 +10,8 @@ process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test_not_used'
 // High limit so tests sending many failed logins are not throttled.
 process.env.LOGIN_RATE_LIMIT_MAX = '1000';
 process.env.REGISTER_RATE_LIMIT_MAX = '1000';
+process.env.REPORT_RATE_LIMIT_MAX = '1000';
+process.env.DUPLICATE_CHECK_RATE_LIMIT_MAX = '1000';
 // Photos saved by tests go to a temporary folder, never backend/uploads.
 // One folder per test worker process, so parallel test files do not collide.
 process.env.UPLOADS_DIR = require('path').join(

@@ -70,6 +70,8 @@ const env = Object.freeze({
   rateLimitMax: intFromEnv('RATE_LIMIT_MAX', 300),
   loginRateLimitMax: intFromEnv('LOGIN_RATE_LIMIT_MAX', 10),
   registerRateLimitMax: intFromEnv('REGISTER_RATE_LIMIT_MAX', 5),
+  reportRateLimitMax: intFromEnv('REPORT_RATE_LIMIT_MAX', 20),
+  duplicateCheckRateLimitMax: intFromEnv('DUPLICATE_CHECK_RATE_LIMIT_MAX', 60),
 });
 
 /**
