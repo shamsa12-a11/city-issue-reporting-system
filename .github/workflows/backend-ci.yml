@@ -1,0 +1,48 @@
+# Backend CI: installs the backend dependencies and runs the full Jest suite.
+# Tests use an in-memory fake database (backend/tests/helpers.js) and dummy
+# environment values (backend/tests/setup.js): no secrets, no Supabase, no
+# migrations, and the server is never started.
+name: Backend CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Jest (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json "engines": node >= 20
+        node-version: [20.x, 22.x]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the backend test suite
+        run: npm test
+        env:
+          CI: true
