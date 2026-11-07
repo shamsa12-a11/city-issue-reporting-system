@@ -72,6 +72,15 @@ const env = Object.freeze({
   registerRateLimitMax: intFromEnv('REGISTER_RATE_LIMIT_MAX', 5),
   reportRateLimitMax: intFromEnv('REPORT_RATE_LIMIT_MAX', 20),
   duplicateCheckRateLimitMax: intFromEnv('DUPLICATE_CHECK_RATE_LIMIT_MAX', 60),
+  // Status changes, resolves and reopens (Feature 4).
+  workflowRateLimitMax: intFromEnv('WORKFLOW_RATE_LIMIT_MAX', 60),
+
+  // How often the auto-close job runs (Feature 4). Default 15 minutes.
+  autoCloseIntervalMs: intFromEnv('AUTO_CLOSE_INTERVAL_MS', 15 * 60 * 1000),
+  // How often the SLA escalation job runs (Feature 6). Default 5 minutes.
+  escalationIntervalMs: intFromEnv('ESCALATION_INTERVAL_MS', 5 * 60 * 1000),
+  // Feature 8: after photos must be taken within this distance of the issue (metres).
+  afterPhotoMaxDistanceMetres: intFromEnv('AFTER_PHOTO_MAX_DISTANCE_METRES', 50),
 });
 
 /**

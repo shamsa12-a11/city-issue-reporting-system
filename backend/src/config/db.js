@@ -76,6 +76,10 @@ function getClient() {
  *   returned to the pool.
  * - Inside `work`, use only the `client` passed in. Calling query() would run
  *   on a different connection, outside this transaction.
+ * - If the connection breaks (e.g. ECONNRESET), the running query fails and
+ *   that error reaches the caller like any other; the server keeps running.
+ *   PostgreSQL rolls the transaction back when the connection is lost, and the
+ *   broken connection is destroyed instead of being returned to the pool.
  *
  * @template T
  * @param {(client: import('pg').PoolClient) => Promise<T>} work
@@ -83,6 +87,17 @@ function getClient() {
  */
 async function withTransaction(work) {
   const client = await pool.connect();
+  // While a client is checked out, pg-pool does not listen for its 'error'
+  // event. A dropped connection would then emit an unhandled 'error' event,
+  // which stops the whole Node process. pg also rejects the running query, so
+  // the error is only recorded here.
+  let connectionError = null;
+  const onConnectionError = (err) => {
+    connectionError = err;
+    console.error('[db] Connection error during a transaction; discarding connection:', err.message);
+  };
+  client.on('error', onConnectionError);
+
   let releaseError; // passing an error to release() destroys the connection
   try {
     await client.query('BEGIN');
@@ -98,7 +113,9 @@ async function withTransaction(work) {
     }
     throw err;
   } finally {
-    client.release(releaseError);
+    // release() re-attaches pg-pool's own idle error listener straight away.
+    client.removeListener('error', onConnectionError);
+    client.release(releaseError || connectionError || undefined);
   }
 }
 

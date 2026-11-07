@@ -61,4 +61,21 @@ const duplicateCheckLimiter = rateLimit({
   message: tooManyRequests('Too many duplicate checks, please try again later'),
 });
 
-module.exports = { apiLimiter, loginLimiter, registerLimiter, reportLimiter, duplicateCheckLimiter };
+// Status changes, resolves (with photos) and reopens (with photos). Runs
+// before authentication and photo parsing, like reportLimiter.
+const workflowLimiter = rateLimit({
+  windowMs: env.rateLimitWindowMs,
+  limit: env.workflowRateLimitMax,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: tooManyRequests('Too many status updates, please try again later'),
+});
+
+module.exports = {
+  apiLimiter,
+  loginLimiter,
+  registerLimiter,
+  reportLimiter,
+  duplicateCheckLimiter,
+  workflowLimiter,
+};

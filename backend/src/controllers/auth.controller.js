@@ -3,6 +3,7 @@
  * the logic lives in services/auth.service.js.
  */
 const authService = require('../services/auth.service');
+const userService = require('../services/user.service');
 
 /**
  * POST /api/auth/register   (public; always creates a citizen)
@@ -45,4 +46,19 @@ function me(req, res) {
   res.json({ user: req.user });
 }
 
-module.exports = { register, login, me };
+/**
+ * PATCH /api/auth/me/preferences   (any logged-in user)   Feature 9
+ * body: { smsNotificationsEnabled?, preferredLanguage? }  (at least one)
+ * Only these two fields can change; in-app notifications cannot be turned off.
+ * 200: { user }
+ * Errors: 400 VALIDATION_ERROR, 401
+ */
+async function updatePreferences(req, res) {
+  const row = await userService.updatePreferences(req.user.id, {
+    smsNotificationsEnabled: req.body.smsNotificationsEnabled,
+    preferredLanguage: req.body.preferredLanguage,
+  });
+  res.json({ user: userService.toPublicUser(row) });
+}
+
+module.exports = { register, login, me, updatePreferences };

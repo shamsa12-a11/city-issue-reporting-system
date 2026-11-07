@@ -83,4 +83,24 @@ router.post('/register', registerLimiter, registerRules, validate, authControlle
 router.post('/login', loginLimiter, loginRules, validate, authController.login);
 router.get('/me', authenticate, authController.me);
 
+// Feature 9: only SMS on/off and the language; at least one of them.
+const preferenceRules = checkExact(
+  [
+    // No body() root rule here: checkExact would then treat every field as known.
+    body('smsNotificationsEnabled').custom((v, { req }) => {
+      if (v === undefined && (req.body || {}).preferredLanguage === undefined) {
+        throw new Error('Send smsNotificationsEnabled and/or preferredLanguage');
+      }
+      if (v !== undefined && typeof v !== 'boolean') throw new Error('smsNotificationsEnabled must be true or false'); // JSON true / false only
+      return true;
+    }),
+    body('preferredLanguage')
+      .optional()
+      .custom((v) => typeof v === 'string' && LANGUAGES.includes(v))
+      .withMessage(`Preferred language must be one of: ${LANGUAGES.join(', ')}`),
+  ],
+  { message: 'Unknown field(s) in request body' }
+);
+router.patch('/me/preferences', authenticate, preferenceRules, validate, authController.updatePreferences);
+
 module.exports = router;

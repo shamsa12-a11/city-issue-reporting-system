@@ -8,28 +8,45 @@ const issueService = require('../services/issue.service');
 /**
  * POST /api/issues   (citizen only; multipart/form-data)
  * Fields:  categoryId, description, latitude, longitude, districtId? ;
- *          photos: 1–3 JPEG/PNG/WebP files (field "photos")
- * 201:     { issue: { id, referenceNumber, status, reportCount, description,
+ *          photos: 1–3 JPEG/PNG/WebP files (field "photos");
+ *          at most ONE duplicate decision:
+ *            duplicateOfIssueId — "Add my report to this issue"
+ *            confirmDifferent=true — "This is different"
+ * 201 (new issue):
+ *          { outcome: 'created',
+ *            issue: { id, referenceNumber, status, reportCount, description,
  *                     category, district, department, location, slaDueAt,
  *                     createdAt, photos: [{ id, url }] } }
+ * 201 (merged into an existing issue):
+ *          { outcome: 'merged',
+ *            issue:  { id, referenceNumber, status, reportCount, category,
+ *                      district, createdAt },
+ *            report: { id, description, location, createdAt, photos: [{ id, url }] } }
  * Errors:  400 VALIDATION_ERROR / INVALID_CATEGORY / INVALID_DISTRICT /
  *              PHOTOS_REQUIRED / TOO_MANY_PHOTOS / INVALID_UPLOAD,
- *          401, 403, 413 PHOTO_TOO_LARGE, 415 UNSUPPORTED_IMAGE_TYPE,
+ *          401, 403,
+ *          409 POSSIBLE_DUPLICATES (no decision sent and similar issues exist;
+ *              error.details.candidates has the same shape as GET /duplicates)
+ *              / DUPLICATE_NOT_ELIGIBLE / ALREADY_REPORTED,
+ *          413 PHOTO_TOO_LARGE, 415 UNSUPPORTED_IMAGE_TYPE,
  *          422 OUTSIDE_SERVICE_AREA ("Outside service area") / CATEGORY_UNAVAILABLE,
- *          429 TOO_MANY_REQUESTS
+ *          429 TOO_MANY_REQUESTS, 503 TRY_AGAIN
  */
 async function create(req, res) {
-  const { categoryId, description, latitude, longitude, districtId } = req.body;
-  const issue = await issueService.createIssue({
+  const { categoryId, description, latitude, longitude, districtId, duplicateOfIssueId, confirmDifferent } =
+    req.body;
+  const result = await issueService.createIssue({
     citizenId: req.user.id,
     categoryId,
     description,
     latitude,
     longitude,
     districtId: districtId || null, // empty = not chosen
+    duplicateOfIssueId: duplicateOfIssueId || null, // empty = no merge
+    confirmDifferent: confirmDifferent === true, // converted by the route rules
     files: req.files,
   });
-  res.status(201).json({ issue });
+  res.status(201).json(result);
 }
 
 /**

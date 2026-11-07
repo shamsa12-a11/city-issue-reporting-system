@@ -83,6 +83,8 @@ describe('POST /api/issues — success', () => {
     const res = await report();
 
     expect(res.status).toBe(201);
+    expect(Object.keys(res.body).sort()).toEqual(['issue', 'outcome']);
+    expect(res.body.outcome).toBe('created');
     const { issue } = res.body;
     expect(issue).toEqual({
       id: 123,
@@ -97,7 +99,21 @@ describe('POST /api/issues — success', () => {
       slaDueAt: new Date(FAKE_DB_NOW.getTime() + 336 * 3600 * 1000).toISOString(), // roads: 14 days
       createdAt: FAKE_DB_NOW.toISOString(),
       photos: [{ id: expect.any(Number), url: expect.stringMatching(/^\/uploads\/issues\/[0-9a-f-]{36}\.jpg$/) }],
+      // Feature 5 (D3): the shared SLA object; clock starts at creation.
+      sla: {
+        state: 'on_track',
+        color: 'green',
+        startedAt: FAKE_DB_NOW.toISOString(),
+        dueAt: new Date(FAKE_DB_NOW.getTime() + 336 * 3600 * 1000).toISOString(),
+        warningAt: new Date(FAKE_DB_NOW.getTime() + 252 * 3600 * 1000).toISOString(), // 75% of 336 h
+        remainingSeconds: 336 * 3600,
+        overdueSeconds: 0,
+        elapsedPercent: 0,
+        clockStopped: false,
+        evaluatedAt: FAKE_DB_NOW.toISOString(),
+      },
     });
+    expect(issue.sla.dueAt).toBe(issue.slaDueAt); // same deadline as the existing field
     expect(fs.existsSync(fileOnDisk(issue.photos[0].url))).toBe(true);
   });
 
@@ -110,14 +126,27 @@ describe('POST /api/issues — success', () => {
     for (const p of res.body.issue.photos) expect(fs.existsSync(fileOnDisk(p.url))).toBe(true);
   });
 
-  test('writes issue, original report, photos, status history and subscription in ONE transaction', async () => {
+  test('writes issue, assignment, original report, photos, status history and subscription in ONE transaction', async () => {
     await report({ photos: [IMAGES.jpeg, IMAGES.png] });
 
     expect(db.withTransaction).toHaveBeenCalledTimes(1);
     expect(db.transactionLog).toEqual(['COMMIT']);
-    const order = transactionSql().map((sql) => sql.match(/INSERT INTO (\w+)/)[1]);
+    const order = transactionSql().map((sql) => {
+      if (sql.includes('lock_timeout')) return 'lock_timeout';
+      if (sql.includes('pg_advisory_xact_lock')) return 'advisory_lock';
+      if (sql.includes('AS similar_issue_id')) return 'review_check';
+      if (sql.includes('ST_DWithin(i.location, p.point')) return 'duplicate_recheck';
+      if (sql.includes('FROM routing_rules rr')) return 'routing_locked';
+      return sql.match(/INSERT INTO (\w+)/)[1];
+    });
     expect(order).toEqual([
+      'lock_timeout',
+      'advisory_lock',
+      'duplicate_recheck',
+      'review_check',
+      'routing_locked',
       'issues',
+      'assignments',
       'issue_reports',
       'photos',
       'photos',
@@ -426,7 +455,8 @@ describe('POST /api/issues — district detection', () => {
   test('a point on the shared Hodan/Waberi edge goes to the lowest id (Hodan) every time', async () => {
     const edge = withFields({ latitude: '2.03', longitude: '45.30' });
     const first = await report({ fields: edge });
-    const second = await report({ fields: edge });
+    // Same place again: "This is different" skips the duplicate prompt.
+    const second = await report({ fields: { ...edge, confirmDifferent: 'true' } });
 
     expect(first.body.issue.district.name).toBe('Hodan');
     expect(second.body.issue.district.name).toBe('Hodan');
@@ -530,12 +560,82 @@ describe('POST /api/issues — routing', () => {
     expect(tables().issues[0].department_id).toBeNull();
   });
 
-  test('no assignments row is created in this step', async () => {
+  test('routed issue -> one current auto_route assignment to that department (Feature 3)', async () => {
+    const res = await report({ fields: withFields({ categoryId: '3' }) });
+
+    expect(res.status).toBe(201);
+    expect(tables().assignments).toEqual([
+      expect.objectContaining({
+        issue_id: tables().issues[0].id,
+        department_id: 2, // Hodan Sanitation
+        assignment_type: 'auto_route',
+        is_current: true,
+        officer_id: null,
+        supervisor_id: null,
+        assigned_by: null, // automatic routing
+        reason: null,
+      }),
+    ]);
+    // Never exposed to the citizen.
+    expect(JSON.stringify(res.body)).not.toMatch(/assignment/i);
+  });
+
+  test('the department is looked up again inside the transaction, share-locked', async () => {
     await report();
 
-    for (const sql of [...transactionSql(), ...db.query.mock.calls.map(([s]) => s)]) {
-      expect(sql).not.toMatch(/assignments/i);
-    }
+    const routing = transactionSql().filter((sql) => sql.includes('FROM routing_rules rr'));
+    expect(routing).toHaveLength(1);
+    expect(routing[0]).toMatch(/FOR SHARE OF rr, dep/);
+  });
+
+  test('a rule changed between the first lookup and the transaction -> the new department is used', async () => {
+    // Admin moves Roads/Hodan to Hodan Sanitation (id 2) right after phase 1.
+    db.afterQueryOnce('FROM routing_rules rr', () =>
+      db.setRoutingRules(
+        db.getRoutingRules().map((r) =>
+          r.category_id === 1 && r.district_id === 1 ? { ...r, department_id: 2 } : r
+        )
+      )
+    );
+
+    const res = await report();
+
+    expect(res.body.issue.department).toEqual({ id: 2, name: 'Hodan Sanitation' });
+    expect(tables().issues[0].department_id).toBe(2);
+    expect(tables().assignments[0].department_id).toBe(2);
+  });
+
+  test.each([
+    ['no routing rule (Karaan)', () => {}, { latitude: '2.08', longitude: '45.36' }],
+    [
+      'rule pointing to an inactive department',
+      () =>
+        db.setDepartments(
+          makeDepartmentRows().map((d) => (d.id === 1 ? { ...d, is_active: false } : d))
+        ),
+      {},
+    ],
+  ])('%s -> no assignment row (Unassigned queue)', async (_label, setup, point) => {
+    setup();
+
+    const res = await report({ fields: withFields(point) });
+
+    expect(res.status).toBe(201);
+    expect(tables().issues[0].department_id).toBeNull();
+    expect(tables().assignments).toHaveLength(0);
+    expect(transactionSql().some((sql) => sql.includes('INSERT INTO assignments'))).toBe(false);
+  });
+
+  test('failure at the assignment insert -> 500, everything rolled back, photos deleted', async () => {
+    db.failTransactionOn('INSERT INTO assignments');
+    const before = countStoredFiles();
+
+    const res = await report({ photos: [IMAGES.jpeg, IMAGES.png] });
+
+    expect(res.status).toBe(500);
+    expect(db.transactionLog).toEqual(['ROLLBACK']);
+    for (const rows of Object.values(tables())) expect(rows).toHaveLength(0);
+    expect(countStoredFiles()).toBe(before);
   });
 });
 

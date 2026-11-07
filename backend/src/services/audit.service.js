@@ -15,9 +15,15 @@ const db = require('../config/db');
  * @param {string|number} [entry.entityId]
  * @param {object}      [entry.details]  extra JSON data (never secrets)
  * @param {string}      [entry.ipAddress]
+ * @param {{ query: Function }} [executor] db (pool, default) or a transaction
+ *   client. Pass the client so the audit row commits or rolls back together
+ *   with the action it records.
  */
-async function recordAudit({ actorId, action, entityType, entityId, details = {}, ipAddress }) {
-  await db.query(
+async function recordAudit(
+  { actorId, action, entityType, entityId, details = {}, ipAddress },
+  executor = db
+) {
+  await executor.query(
     `INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, details, ip_address)
      VALUES ($1, $2, $3, $4, $5::jsonb, $6::inet)`,
     [

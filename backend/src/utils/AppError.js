@@ -9,7 +9,8 @@ class AppError extends Error {
    * @param {number} statusCode HTTP status (4xx/5xx).
    * @param {string} code       Stable machine-readable code, e.g. 'INVALID_CREDENTIALS'.
    * @param {string} message    Human-readable message safe to show the user.
-   * @param {Array}  [details]  Optional extra info (e.g. validation errors per field).
+   * @param {Array|object} [details] Optional extra info (e.g. validation errors
+   *                                per field, or { candidates } for POSSIBLE_DUPLICATES).
    */
   constructor(statusCode, code, message, details) {
     super(message);

@@ -101,4 +101,22 @@ function toPublicUser(row) {
   };
 }
 
-module.exports = { findUserByPhone, findUserById, createUser, toPublicUser };
+/**
+ * Feature 9: updates ONLY the notification preferences of a user (SMS on/off
+ * and language). In-app notifications have no setting (they cannot be
+ * turned off). A value left undefined keeps the current one.
+ * @returns {Promise<object|null>} the updated user row (USER_SELECT shape)
+ */
+async function updatePreferences(id, { smsNotificationsEnabled, preferredLanguage }) {
+  const { rowCount } = await db.query(
+    `UPDATE users
+        SET sms_notifications_enabled = COALESCE($2::boolean, sms_notifications_enabled),
+            preferred_language = COALESCE($3::text, preferred_language),
+            updated_at = now()
+      WHERE id = $1`,
+    [id, smsNotificationsEnabled ?? null, preferredLanguage ?? null]
+  );
+  return rowCount === 0 ? null : findUserById(id);
+}
+
+module.exports = { findUserByPhone, findUserById, createUser, toPublicUser, updatePreferences };
