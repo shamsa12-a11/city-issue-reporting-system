@@ -34,6 +34,7 @@ departments assign, fix and track them. Full requirements:
 | Citizen "My reports", fix rating; supervisor duplicate-review queue; staff issue details | Done (backend API) |
 | Simulated SMS outbox behind a replaceable SMS adapter (`src/sms/providers.js`) | Done |
 | GitHub Actions CI (`.github/workflows/backend-ci.yml`: `npm ci` + `npm test`, Node 20 and 22) | Configured (first run happens on GitHub after a push) |
+| Staff workflow notifications (officers, supervisors, admins), staff assignment history, Admin "All issues" page with search and reroute | Done (frontend + backend API) |
 | Frontend (React + Vite): public pages, citizen workspace, officer / supervisor / admin workspaces, maps and analytics, simulated payments, Somali and English — see [frontend/README.md](frontend/README.md) and [frontend/REQUIREMENTS_COVERAGE.md](frontend/REQUIREMENTS_COVERAGE.md) | Done (tested in the browser against the backend app on its test database; live Supabase run pending) |
 
 ## Technology stack
@@ -48,7 +49,40 @@ departments assign, fix and track them. Full requirements:
 | Uploads | `multer` 2.5 (memory storage); photos stored on local disk |
 | Config | `dotenv` 18 |
 | Tests | Jest 30, Supertest 7 |
-| Frontend (planned) | React, Tailwind CSS, React Router, Axios |
+| Frontend | React 19.3, React Router 7.18, Vite 8.3, Tailwind CSS 4.3, Axios 1.21 |
+| Maps and charts | Leaflet 1.9 + React Leaflet 5.0 (maps, heatmap), Recharts 3.10 (analytics) |
+| Icons | lucide-react 1.70 |
+| Languages | Somali and English (frontend dictionaries in `frontend/src/i18n`; API messages in both languages) |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    UI["React + Vite app<br/>public pages, citizen,<br/>officer, supervisor, admin<br/>(Somali / English)"]
+  end
+  subgraph API["Express API (backend/src)"]
+    R["routes + validation"] --> C["controllers"] --> S["services<br/>(business rules,<br/>parameterized SQL)"]
+    J["background jobs<br/>auto-close, SLA escalation"] --> S
+    S --> SMS["SMS adapter<br/>(simulated outbox)"]
+    S --> PAY["payment adapters<br/>EVC Plus / Zaad / eDahab<br/>(simulated)"]
+  end
+  DB[("PostgreSQL + PostGIS<br/>(Supabase)")]
+  FS[("photo storage<br/>backend/uploads")]
+  UI -- "/api (JSON + JWT)" --> R
+  UI -- "/uploads (photos)" --> FS
+  S --> DB
+  S --> FS
+```
+
+- The browser only talks to the API (`/api`) and the photo folder (`/uploads`).
+- Every request: `route → validation → controller → service → database`.
+  Roles are checked on the server for every protected route.
+- SMS and payments go through adapters, so real providers can replace the
+  simulators later.
+- Local development (`npm run dev`) uses the same Express app on an
+  in-memory database instead of PostgreSQL (see
+  [Local development](#local-development-one-command)).
 
 ## Backend architecture
 
@@ -100,7 +134,13 @@ prefixes. Open <http://127.0.0.1:5173>. Press **Ctrl+C** to stop both.
 - The backend runs on `127.0.0.1:5000` with an **in-memory database** and
   sample data (`backend/scripts/dev-memory-server.js`). It never reads
   `backend/.env`, never loads the PostgreSQL client, never connects to
-  Supabase and never starts the background jobs. Data is lost when it stops.
+  Supabase and never starts the production background jobs. Data is lost
+  when it stops.
+- It runs without watch mode, so it only restarts when you stop and start
+  it. Its clock is the real time (dates match the calendar; resolution and
+  SLA times are real), and the SLA escalation pass runs on the in-memory data
+  at start-up and then every 60 seconds (supervisor notifications, and the
+  Admin alert 24 hours after a deadline with no supervisor action).
 - The frontend (Vite) runs on `127.0.0.1:5173` and proxies `/api` and
   `/uploads` to that backend, only after checking it answers as in-memory.
 - It refuses to start if port 5000 or 5173 is already in use, if
@@ -214,6 +254,45 @@ business rules are also enforced by CHECK / UNIQUE constraints and indexes.
 | `payments` | simulated mobile-money payments (`PAY-` / `RCP-` generated) | `payer_id → users`, `issue_id` (optional) |
 | `audit_logs` | who did what, when (JSON details, IP) | `actor_id → users` (`SET NULL`) |
 
+```mermaid
+erDiagram
+  roles ||--o{ users : "role_id"
+  districts ||--o{ departments : "district_id"
+  departments |o--o{ users : "department_id (staff)"
+  categories ||--|| slas : "category_id"
+  categories ||--o{ routing_rules : "category_id"
+  districts ||--o{ routing_rules : "district_id"
+  departments ||--o{ routing_rules : "department_id"
+  categories ||--o{ issues : "category_id"
+  districts ||--o{ issues : "district_id"
+  departments |o--o{ issues : "department_id (NULL = Unassigned)"
+  users ||--o{ issues : "created_by"
+  issues |o--o{ issues : "similar_issue_id"
+  issues ||--o{ issue_reports : "issue_id"
+  users ||--o{ issue_reports : "citizen_id"
+  issues ||--o{ photos : "issue_id"
+  issue_reports |o--o{ photos : "before photos"
+  status_history |o--o{ photos : "after / reopen photos"
+  issues ||--o{ status_history : "issue_id"
+  users |o--o{ status_history : "changed_by"
+  issues ||--o{ assignments : "issue_id"
+  departments ||--o{ assignments : "department_id"
+  users |o--o{ assignments : "officer / supervisor / assigned_by"
+  issues ||--o{ upvotes : "issue_id"
+  users ||--o{ upvotes : "citizen_id"
+  issues ||--o{ issue_subscriptions : "issue_id"
+  users ||--o{ issue_subscriptions : "user_id"
+  issues ||--o{ issue_comments : "issue_id"
+  users ||--o{ issue_comments : "author_id"
+  users ||--o{ notifications : "user_id"
+  issues |o--o{ notifications : "issue_id"
+  users ||--o{ sms_outbox : "user_id"
+  issues |o--o{ sms_outbox : "issue_id"
+  users ||--o{ payments : "payer_id"
+  issues |o--o{ payments : "issue_id"
+  users |o--o{ audit_logs : "actor_id"
+```
+
 The trigger `issues_require_after_photo` refuses changing an issue to
 `resolved` without an after photo. Row-level security is enabled on every table with no
 policies, so only the backend (database owner) can read or write them.
@@ -227,9 +306,9 @@ ownership, department and visibility).
 | Role | Can |
 |---|---|
 | Citizen | register and log in by phone; report issues with photos and location; see their reports (`/api/issues/mine`) and status; upvote open issues; reopen within 7 days; rate the fix; notifications and own SMS outbox; simulated payments |
-| Officer | issues assigned to them only; details and photos; move to In progress, waiting for materials; resolve with after photos at the location; comments |
-| Supervisor | their department's issues and officers' workload; assign/reassign officers; duplicate-review queue; SLA escalations and comments; heatmap and performance report of their district |
-| Admin | users and roles, districts, departments, categories, routing rules, SLAs; Unassigned queue and reroute with a reason; mark issues sensitive; escalations, heatmap and reports for all districts; payments (read-only) |
+| Officer | issues assigned to them only; details and photos; move to In progress, waiting for materials; resolve with after photos at the location; comments; in-app notifications when an issue is assigned, reassigned away, rerouted away or reopened back to them |
+| Supervisor | their department's issues and officers' workload; assign/reassign officers; duplicate-review queue; SLA escalations and comments; heatmap and performance report of their district; in-app notifications for new, flagged, rerouted and repeatedly reopened issues of their department |
+| Admin | users and roles, districts, departments, categories, routing rules, SLAs; All issues list (search, filters) and Unassigned queue, reroute with a reason; mark issues sensitive; escalations, heatmap and reports for all districts; payments (read-only); in-app notifications for issues without a department and SLA escalation alerts |
 | Public (no login) | public issue list and detail (no personal data, no sensitive issues), heatmap |
 
 ## API endpoints
@@ -525,6 +604,14 @@ trimming. Unknown fields are rejected with `400`.
   It tells the admin why an issue arrived in the Unassigned queue (it comes
   from the `issue.reopen_escalation` audit entry). Other roles never get it,
   and the Unassigned queue response itself is unchanged.
+- Staff also get a top-level `assignmentEvents` list (oldest first): every
+  assignment row of the issue — automatic routing, officer assignment,
+  reassignment (with its reason), admin reroute (with its reason) and reopen
+  escalation. Reassigning and rerouting do not change the status, so they
+  have no `history` entry; the staff issue page shows both lists in one
+  timeline. Citizens never get it (it names staff).
+  `{ "id": 7, "type": "auto_route" | "officer_assign" | "reassign" | "manual_reroute" | "reopen_escalation", "reason": "..." | null, "createdAt": "...", "department": { id, name } | null, "officer": { id, name } | null, "supervisor": { id, name } | null, "assignedBy": { id, name, role } | null }`
+  (`assignedBy: null` = automatic).
 - History is oldest first. `changedBy` is `null` for system changes. Citizens
   are never named (`{ "role": "citizen" }`). Staff are named only to staff
   (`{ id, role, name }`); citizens see only their role. A citizen does not
@@ -715,6 +802,40 @@ optional and filters to one district (an unknown district gives an empty list).
 ```
 
 Errors: `400 VALIDATION_ERROR`.
+
+#### `GET /api/admin/issues?status=&districtId=&categoryId=&departmentId=&search=&limit=&offset=`
+
+The Admin "All issues" list: every issue, sensitive ones included, newest
+first. Read-only; rerouting still uses `POST /api/admin/issues/:id/reroute`
+with all of its checks.
+
+- `status`: `all` (default), `open` (New, Assigned, In progress), `new`,
+  `assigned`, `in_progress`, `resolved`, `closed`.
+- `districtId`, `categoryId`, `departmentId`: optional filters.
+- `search`: reference number or part of it (`CIT-000125`, `cit-000125`,
+  `125`); up to 30 characters, only letters, digits and `-` are used.
+- `limit` 1–100 (default 20), `offset` (default 0).
+
+```json
+{
+  "issues": [{
+    "id": 125, "referenceNumber": "CIT-000125", "status": "in_progress", "subStatus": null,
+    "description": "...", "reportCount": 2, "isSensitive": false,
+    "category": { "id": 3, "code": "rubbish", "nameEn": "Rubbish", "nameSo": "Qashin" },
+    "district": { "id": 1, "name": "Hodan", "city": "Mogadishu" },
+    "department": { "id": 1, "name": "Hodan Public Works" },
+    "officer": { "id": 6, "name": "Ahmed Mahad Abdi" },
+    "canReroute": true,
+    "createdAt": "...", "slaDueAt": "...",
+    "sla": { "state": "breached", "color": "red", "...": "see SLA timers" }
+  }],
+  "pagination": { "limit": 20, "offset": 0, "total": 1 }
+}
+```
+
+`canReroute` is `true` only for open issues. Errors: `400 VALIDATION_ERROR`
+(unknown status, bad ids, search too long, unknown fields), `401`, `403`
+(not an admin).
 
 #### `GET /api/admin/issues/unassigned?limit=&offset=`
 
@@ -938,9 +1059,25 @@ The message contains only the reference number and the new status:
 | Statuses | New, Assigned, In progress, Resolved, Closed | Cusub, Loo xilsaaray, Waa la wadaa, Waa la xalliyay, Waa la xiray |
 
 Not notified: creating an issue, and setting or clearing "Waiting for
-materials" (the status does not change). Staff are not notified by this
-feature. In the auto-close job each issue's notifications are inside its
-own savepoint, so a failure only affects that issue.
+materials" (the status does not change). Staff never get these
+status-change notifications. In the auto-close job each issue's
+notifications are inside its own savepoint, so a failure only affects that
+issue.
+
+**Staff workflow notifications** (in-app only, no SMS; same transaction as
+the action; only active staff; never the person who did the action; one per
+recipient per event; reference number only):
+
+| Event | Who is notified | Type |
+|---|---|---|
+| New issue routed to a department | active supervisors of that department | `assignment` |
+| New issue flagged for review (10 m from a similar open issue) | the same supervisors, instead of the above | `supervisor_review` |
+| New issue without a department (e.g. Karaan) | every active admin | `assignment` |
+| Officer assigned / reassigned | the new officer; on a reassignment also the previous officer | `assignment` |
+| Admin reroute | supervisors of the new department, and the officer who had the issue | `assignment` |
+| Citizen reopens (1st time) | the officer it goes back to | `assignment` |
+| Reopened twice | the department supervisor it is sent to, or every active admin when there is none (Unassigned queue) | `assignment` |
+| SLA breach / no action in 24 h | see [SLA escalation](#sla-escalation-feature-6) | `escalation`, `escalation_admin_alert` |
 
 All endpoints below require a logged-in user and only ever show **the
 user's own** data.
@@ -1028,9 +1165,15 @@ Citizens never see escalation data.
   "actionedOnTime": null,
   "adminAlertedAt": null,
   "adminAlertReason": null,                   // 'no_action' | 'no_supervisor'
-  "adminAlertDelivered": null                 // false = no active admin existed
+  "adminAlertDelivered": null,                // false = no active admin existed
+  "resolvedBeforeDetection": false,           // true = already resolved/closed when the breach was found: no action needed
+  "actionRequired": true                      // supervisors were notified and no qualifying action yet
 }
 ```
+
+The staff pages show the "Action due" deadline in red only while
+`actionRequired` is true; an issue resolved before detection shows
+"no action needed" instead.
 
 #### `GET /api/supervisor/escalations?state=&limit=&offset=` — supervisor
 Escalated issues of the supervisor's department (or sent to them), most
@@ -1318,6 +1461,31 @@ router.patch('/issues/:id/status', authenticate, authorize(ROLES.OFFICER, ROLES.
 `authenticate` returns `401` without a valid token; `authorize` returns `403`
 for any role not listed.
 
+## Screenshots
+
+Taken from the local demo (`npm run dev`, in-memory sample data; the names
+are demo accounts, not real people).
+
+**Public home page**: what the system does, report or explore issues, Somali / English switch.
+
+![Public home page](docs/screenshots/01-landing.png)
+
+**Citizen: report an issue**: category, description, photos and the location on the map.
+
+![Citizen report form](docs/screenshots/02-citizen-report-issue.png)
+
+**Admin: All issues**: every issue with reference search, status / district / category filters, SLA state, department, officer and Reroute.
+
+![Admin All issues page](docs/screenshots/03-admin-all-issues.png)
+
+**Admin: Maps & analytics**: live KPIs (received, resolved, average resolution time, SLA breaches and rate, reopened rate) and the issue heatmap.
+
+![Analytics KPIs and heatmap](docs/screenshots/04-analytics-kpis-heatmap.png)
+
+**Admin: analytics charts**: issues by district (received and resolved), by category, and SLA breach rate by district.
+
+![Analytics charts](docs/screenshots/05-analytics-charts.png)
+
 ## Demo accounts
 
 All demo accounts use the password **`CityDemo#2026`** (local demo only — never
@@ -1356,7 +1524,7 @@ cd backend
 npm test
 ```
 
-1335 tests in 44 files. They run without a database (the `pg` pool is replaced
+1377 tests in 52 files. They run without a database (the `pg` pool is replaced
 by an in-memory fake that answers the same parameterized queries):
 
 | File | Covers |
@@ -1388,7 +1556,7 @@ by an in-memory fake that answers the same parameterized queries):
 | `tests/admin.sla.test.js` | admin-only SLA list and change, create-if-missing, unchanged writes nothing, audit with old/new hours, rollback, lock timeout, validation, existing deadlines unchanged |
 | `tests/assignment.assign.test.js` | assign (New → Assigned, one transaction, statement order), reassign with reason and history, access moving between officers, officer checks (department, leave, inactive, role), permissions, validation, rollback at every write, lock timeout |
 | `tests/assignment.lists.test.js` | supervisor department list and filters (open incl. unassigned), workload counts (current assignments on open issues only), the officer's own list, roles, paging |
-| `tests/notifications.statuschange.test.js` | every status change notifies each distinct linked citizen (merged included, duplicates removed, staff never); SMS only when active and enabled, in the recipient's language; sub-status and creation notify nobody; message privacy; same transaction (rollback); auto-close savepoint; the generic insert reused by Feature 6 |
+| `tests/notifications.statuschange.test.js` | every status change notifies each distinct linked citizen (merged included, duplicates removed; staff never get status-change notifications); SMS only when active and enabled, in the recipient's language; sub-status and creation notify nobody; message privacy; same transaction (rollback); auto-close savepoint; the generic insert reused by Feature 6 |
 | `tests/notifications.api.test.js` | own inbox (language, unread filter, paging), unread count, mark read (once, others' 404), read-all, own SMS outbox, preferences (SMS off, language, only two fields, validation) |
 | `tests/status.substatus.test.js` | Waiting for materials: set/clear while in progress, history, permissions, resolve clears it, SLA keeps counting, rejections, rollback |
 | `tests/status.autoclose.test.js` | auto-close at exactly 7 days, system history row, idempotency, database time, batching, one savepoint per issue, a failing issue never blocks the others and is retried, throwing loggers, reopen vs auto-close races, the background job (start, interval, errors, no overlap, not started by `app.js`) |
@@ -1404,9 +1572,25 @@ by an in-memory fake that answers the same parameterized queries):
 | `tests/admin.management.test.js` | admin-only access on every management route, user list/search/filters/paging, staff creation (bcrypt, login, audit without the password), role and department rules, citizen/staff separation, self-protection, last active admin, officers with open work, rollback, districts (GeoJSON validation, PostGIS validity, duplicates, deactivation, last active), departments (duplicates, inactive district, routing effect), categories (six fixed codes, names, last active) |
 | `tests/sms.adapter.test.js` | SMS only through the provider adapter, the simulated outbox default, a replacement provider, provider failure rolls the status change back |
 | `tests/payments.test.js` | all three providers end to end, unique receipts, failed (test PINs), pending, cancelled, duplicate confirmations and cancels, one pending payment per citizen, lock timeout, validation, PIN never stored, access (payer, other citizen, admin read-only, staff), provider outages, database failures |
+| `tests/notifications.staff.test.js` | staff workflow notifications: new issue (department supervisors, review flag, admins for no department), assign / reassign, reroute, reopen (officer, supervisor, admins), active staff only, never the actor, no SMS, rollback, staff inbox |
+| `tests/status.assignmentEvents.test.js` | staff assignment timeline (routing, assign, reassign with reason, reroute with reason), status history unchanged, citizens never get it |
+| `tests/admin.issues.list.test.js` | Admin "All issues": every issue incl. sensitive, filters, reference search, paging, `canReroute`, admin only, validation, reroute rules unchanged |
+| `tests/report.regression.test.js` | analytics regressions: reopened rate after a real reopen, district / category filters change the totals, totals equal the district rows, heatmap issues vs reports |
+| `tests/escalation.adminalert.dev.test.js` | overdue escalation → Admin alert with a live clock and a repeated pass: deadline boundary, every active admin once, no duplicates, supervisor comment prevents it, resolved/closed before detection never alerted |
+| `tests/workflow.resolve-reopen.test.js` | end to end through the API: report → assign → start → resolve (50 m rule) → citizen sees Resolved → reopen |
+| `tests/dev.memory.server.test.js` | the in-memory development server: ignores `DATABASE_URL`/`.env`, never loads `pg`, no production jobs, no watch mode, real-time clock, repeated escalation pass |
+| `tests/dev.liveclock.test.js` | the in-memory clock: frozen for tests, moving for the development server; real resolution time in analytics |
 | `tests/public.feature10.test.js` | public list (exact fields, no login, sensitive left out, privacy, filters, paging, validation), public detail with before/after photos, reopened issues, sensitive = unknown 404, invalid references; admin sensitive switch (audit, validation, roles, lock timeout) |
 
 Photo tests write to a temporary folder, never to `backend/uploads`.
+
+Frontend checks (the frontend has no test runner):
+
+```bash
+cd frontend
+npm run check:i18n   # every t('…') key exists in both Somali and English
+npm run build        # production build
+```
 
 ## Known limitations
 
@@ -1418,6 +1602,10 @@ Photo tests write to a temporary folder, never to `backend/uploads`.
 - Features 6–13, payments, admin management and the audit-gap endpoints have
   not yet been verified against the live Supabase database (SQL, PostGIS,
   locking and concurrency); see the coverage report for the list.
+- The local demo (`npm run dev`) keeps everything in memory: new accounts,
+  departments and issues are lost when it stops. Its sample issue
+  CIT-000125 is overdue at start-up; the Admin alert for it appears 12 hours
+  later if no supervisor acts.
 - The seed file contains reference data and demo accounts but no demo
   issues; issues for the demo (heatmap, report, SLA breach) are created
   through the API.
@@ -1444,7 +1632,11 @@ Photo tests write to a temporary folder, never to `backend/uploads`.
 - The escalation job runs inside the API process and acts on existing data
   at start-up: the first run against a database marks every past breach and
   may notify supervisors and alert admins for old open issues at once.
-- Escalation notifications go to supervisors and admins in-app only.
+- Staff notifications (escalations and workflow) are in-app only; staff never get SMS.
+- An admin is alerted 24 hours after an SLA deadline when no supervisor
+  commented or (re)assigned, even if the issue was resolved meanwhile
+  (resolving does not count as the supervisor's action). Issues already
+  resolved when the breach is detected are never alerted.
 - An SLA change applies to issues created afterwards only. The issue form
   reads the category's SLA hours just before it saves the issue, so a change
   made at that very moment can still give that one report the old value.
@@ -1475,8 +1667,6 @@ Photo tests write to a temporary folder, never to `backend/uploads`.
   previous department is kept in the ended assignment and the audit entry.
 - Changing a routing rule affects new issues only; existing issues are moved
   with a manual reroute. Rules cannot be deleted.
-- Admins cannot yet manage users, districts, departments or categories
-  through the API.
 - A report answered with `409 POSSIBLE_DUPLICATES` and then sent again counts
   twice against `REPORT_RATE_LIMIT_MAX`.
 - Registration does not verify phone ownership (no SMS code); SMS is

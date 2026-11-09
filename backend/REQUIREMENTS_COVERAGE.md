@@ -1,7 +1,7 @@
 # Backend requirements coverage — Project 13
 
 Source of truth: [PROJECT_REQUIREMENTS.md](../PROJECT_REQUIREMENTS.md).
-Test run: `npm test` — **1335 passed, 0 failed, 0 skipped (44 files)**.
+Test run: `npm test` — **1377 passed, 0 failed, 0 skipped (52 files)**.
 All tests use an in-memory fake database (`tests/helpers.js`); they prove the
 application logic, not the SQL against PostgreSQL.
 
@@ -62,7 +62,7 @@ Admin management tests: `admin.management` 98.
 | Rate limiting | Done | `middleware/rateLimiters.js` (all `/api`, stricter for login, register, reports, workflow) |
 | Secrets in `.env`, `.env.example` | Done | `.gitignore` excludes `.env`; `backend/.env.example` |
 | Audit log of sensitive actions (who, what, when) | Done | `audit.service.js`; asserted in each feature's tests |
-| ≥ 15 tests, one command | Done | `npm test`, 1335 tests |
+| ≥ 15 tests, one command | Done | `npm test`, 1377 tests |
 | GitHub Actions CI | Configured, first run pending | `.github/workflows/backend-ci.yml` |
 | ≥ 2 charts from real database queries | Done on the backend | report `monthly` and `totals`, heatmap points (charts drawn by the frontend) |
 | Somali and English | Partial | backend texts for users are bilingual (notifications, SMS, categories, escalation messages, heatmap message, receipt); errors use stable codes for frontend translation; language switch and screens: frontend |

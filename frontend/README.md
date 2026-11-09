@@ -54,7 +54,7 @@ src/
 | `/citizen/*` | citizen | dashboard, report an issue, My reports + detail (reopen, rating), notifications + SMS outbox, payments + receipts, settings |
 | `/officer`, `/officer/issues[/:id]` | officer | own assignments; start work, waiting for materials, resolve with after photos at the location, comments |
 | `/supervisor/*` | supervisor | overview, department issues + assign/reassign, workload, escalations, duplicate review, maps & analytics |
-| `/admin/*` | admin | overview, Unassigned queue + reroute, escalations, analytics, users, districts, departments, categories & SLAs, routing rules, payments, sensitive switch |
+| `/admin/*` | admin | overview, All issues (reference search, filters, reroute), Unassigned queue + reroute, escalations, analytics, users, districts, departments, categories & SLAs, routing rules, payments, sensitive switch |
 | `/<role>/notifications`, `/<role>/settings` | every logged-in role | in-app notifications, language (and SMS for citizens) |
 
 Coverage against the brief: [REQUIREMENTS_COVERAGE.md](REQUIREMENTS_COVERAGE.md).
