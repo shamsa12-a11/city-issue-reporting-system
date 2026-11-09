@@ -34,6 +34,7 @@ const db = require('../config/db');
 const AppError = require('../utils/AppError');
 const { withStoredPhotos, getPhotoUrl, isValidStoragePath } = require('../storage/photoStorage');
 const { toSla } = require('./sla');
+const { notifyStaff, staffMessages } = require('./notification.service');
 
 /** Exact text required by the brief for reports outside every district. */
 const OUTSIDE_SERVICE_AREA_MESSAGE = 'Outside service area';
@@ -530,6 +531,26 @@ async function persistNewIssue(input, context) {
       );
 
       await subscribe(client, issue.id, citizenId);
+
+      // Staff in-app notification, same transaction: the department's
+      // supervisors (one 'supervisor_review' instead when flagged for review),
+      // or every admin when the issue has no department (Unassigned queue).
+      if (department) {
+        const review = similarIssueId != null;
+        await notifyStaff(client, {
+          issueId: issue.id,
+          type: review ? 'supervisor_review' : 'assignment',
+          message: review ? staffMessages.reviewIssue(issue.reference_number) : staffMessages.newIssue(issue.reference_number),
+          departmentId: department.id,
+        });
+      } else {
+        await notifyStaff(client, {
+          issueId: issue.id,
+          type: 'assignment',
+          message: staffMessages.unassigned(issue.reference_number),
+          admins: true,
+        });
+      }
 
       return { issue, department, photos };
     })

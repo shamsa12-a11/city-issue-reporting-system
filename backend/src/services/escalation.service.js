@@ -459,6 +459,12 @@ function toSlaEscalation(row) {
     adminAlertReason: alerted ? (supervisorsNotified ? 'no_action' : 'no_supervisor') : null,
     // false = recorded but no active admin existed (E2).
     adminAlertDelivered: alerted ? row.admin_alert_delivered === true : null,
+    // Marker only: the issue was already resolved/closed when the breach was
+    // detected, so nobody was asked to act and there is no action deadline.
+    resolvedBeforeDetection: !supervisorsNotified && !alerted,
+    // Supervisors were asked to act and no qualifying action (comment,
+    // assign or reassign) has been recorded yet: the deadline applies.
+    actionRequired: supervisorsNotified && row.escalation_actioned_at == null,
   };
 }
 

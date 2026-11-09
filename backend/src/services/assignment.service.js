@@ -31,6 +31,7 @@ const { runIssueTransaction, OPEN_STATUSES } = require('./issue.service');
 const { applyStatusChange, lockVisibleIssue, toIssueStatus } = require('./status.service');
 const { toSla } = require('./sla');
 const { markEscalationActioned } = require('./escalation.service');
+const { notifyStaff, staffMessages } = require('./notification.service');
 
 const CLOSED_STATUSES = ['resolved', 'closed'];
 /** status_history comment for New -> Assigned when the supervisor gives none (never names staff). */
@@ -155,6 +156,25 @@ async function assignOfficer({ user, issueId, officerId, reason, comment, ipAddr
       details: { assignmentId: Number(assignment.id) },
       ipAddress,
     });
+    // Staff notifications (same transaction): the new officer, and on a
+    // reassignment the previous officer. Never the supervisor who did it.
+    await notifyStaff(client, {
+      issueId: issue.id,
+      type: 'assignment',
+      message: staffMessages.officerAssigned(issue.reference_number),
+      userIds: [Number(officer.id)],
+      excludeUserId: user.id,
+    });
+    if (isReassign) {
+      await notifyStaff(client, {
+        issueId: issue.id,
+        type: 'assignment',
+        message: staffMessages.officerReassignedAway(issue.reference_number),
+        userIds: [Number(ctx.officer_id)],
+        excludeUserId: user.id,
+      });
+    }
+
     await recordAudit(
       {
         actorId: user.id,

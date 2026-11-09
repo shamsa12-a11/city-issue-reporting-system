@@ -65,9 +65,109 @@ const escalationMessages = {
         },
 };
 
+/**
+ * Workflow messages for officers, supervisors and admins (in-app only), in
+ * both languages. Reference number only: no citizen data, descriptions or
+ * locations. The Somali texts are first drafts and should be checked by a
+ * native speaker.
+ */
+const staffMessages = {
+  /** Supervisors of the department a new issue was routed to. */
+  newIssue: (ref) => ({
+    en: `New issue ${ref} was routed to your department.`,
+    so: `Arrin cusub ${ref} ayaa loo diray waaxdaada.`,
+  }),
+  /** Same, when the new issue is flagged for review (10 m from a similar open issue). */
+  reviewIssue: (ref) => ({
+    en: `New issue ${ref} needs your review: it was reported very close to a similar open issue.`,
+    so: `Arrinta cusub ${ref} waxay u baahan tahay dib-u-eegistaada: waxaa laga soo sheegay meel aad ugu dhow arrin kale oo furan oo la mid ah.`,
+  }),
+  /** Admins: a new issue has no department (Unassigned queue). */
+  unassigned: (ref) => ({
+    en: `Issue ${ref} has no department and is waiting in the Unassigned queue.`,
+    so: `Arrinta ${ref} waax ma laha, waxayna sugaysaa safka aan loo xilsaarin.`,
+  }),
+  /** The officer who now has the issue. */
+  officerAssigned: (ref) => ({
+    en: `Issue ${ref} has been assigned to you.`,
+    so: `Arrinta ${ref} adiga ayaa laguu xilsaaray.`,
+  }),
+  /** The officer who had the issue before a reassignment. */
+  officerReassignedAway: (ref) => ({
+    en: `Issue ${ref} has been reassigned to another officer.`,
+    so: `Arrinta ${ref} waxaa loo wareejiyay sarkaal kale.`,
+  }),
+  /** Supervisors of the department an admin rerouted the issue to. */
+  rerouted: (ref) => ({
+    en: `Issue ${ref} was rerouted to your department by an admin.`,
+    so: `Arrinta ${ref} waxaa waaxdaada u soo wareejiyay maamule.`,
+  }),
+  /** The officer who had the issue before an admin reroute. */
+  reroutedAway: (ref) => ({
+    en: `Issue ${ref} was moved to another department and is no longer assigned to you.`,
+    so: `Arrinta ${ref} waxaa loo wareejiyay waax kale, adigana laguuma sii xilsaarna.`,
+  }),
+  /** The officer the reopened issue went back to. */
+  reopenedToOfficer: (ref) => ({
+    en: `Issue ${ref} was reopened by a citizen and is assigned to you again.`,
+    so: `Arrinta ${ref} waxaa dib u furay muwaadin, waxaana mar kale laguu xilsaaray.`,
+  }),
+  /** The supervisor a repeatedly reopened issue was sent to. */
+  reopenedToSupervisor: (ref, count) => ({
+    en: `Issue ${ref} was reopened ${count} times and has been sent to you.`,
+    so: `Arrinta ${ref} dib ayaa loo furay ${count} jeer, waxaana laguu soo diray adiga.`,
+  }),
+  /** Admins: a reopened issue has no supervisor (Unassigned queue). */
+  reopenedUnassigned: (ref) => ({
+    en: `Issue ${ref} was reopened and has no active supervisor. It is waiting in the Unassigned queue.`,
+    so: `Arrinta ${ref} dib ayaa loo furay, kormeere firfircoon ma laha. Waxay sugaysaa safka aan loo xilsaarin.`,
+  }),
+};
+
 // ---------------------------------------------------------------------------
 // Generic writes (transaction client)
 // ---------------------------------------------------------------------------
+
+/**
+ * Active staff recipients (officer, supervisor, admin roles only; never a
+ * citizen): the active supervisors of an active department, specific users,
+ * and/or every active admin. Excludes the user who did the action.
+ */
+async function findStaffRecipients(client, { departmentId = null, userIds = [], admins = false, excludeUserId = null }) {
+  const { rows } = await client.query(
+    `SELECT u.id AS staff_recipient_id
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       LEFT JOIN departments d ON d.id = u.department_id
+      WHERE u.is_active = TRUE
+        AND r.code IN ('officer', 'supervisor', 'admin')
+        AND (($1::int IS NOT NULL AND r.code = 'supervisor' AND u.department_id = $1::int AND d.is_active = TRUE)
+             OR u.id = ANY($2::bigint[])
+             OR ($3::boolean AND r.code = 'admin'))
+        AND ($4::bigint IS NULL OR u.id <> $4::bigint)
+      ORDER BY u.id`,
+    [
+      departmentId == null ? null : Number(departmentId),
+      userIds.filter((id) => id != null).map(Number),
+      admins === true,
+      excludeUserId == null ? null : Number(excludeUserId),
+    ]
+  );
+  return rows.map((r) => Number(r.staff_recipient_id));
+}
+
+/**
+ * One in-app staff notification per distinct recipient, on the caller's
+ * transaction (a failure rolls the action back, like citizen notifications).
+ * @param {'assignment'|'supervisor_review'} type
+ * @param {{ en: string, so: string }} message
+ * @returns {Promise<number[]>} the recipient ids
+ */
+async function notifyStaff(client, { issueId, type, message, departmentId, userIds, admins, excludeUserId }) {
+  const recipients = await findStaffRecipients(client, { departmentId, userIds, admins, excludeUserId });
+  await insertNotifications(client, { userIds: recipients, issueId, type, messageEn: message.en, messageSo: message.so });
+  return recipients;
+}
 
 /**
  * One in-app notification per DISTINCT user id. Generic: Feature 6 uses it
@@ -257,7 +357,10 @@ module.exports = {
   STATUS_LABELS,
   statusChangeMessages,
   escalationMessages,
+  staffMessages,
   insertNotifications,
+  findStaffRecipients,
+  notifyStaff,
   insertSms,
   notifyStatusChange,
   listMine,

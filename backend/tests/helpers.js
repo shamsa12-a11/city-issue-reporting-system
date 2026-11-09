@@ -283,7 +283,12 @@ const sameId = (a, b) => String(a) === String(b);
  * code that writes outside the transaction. A rolled-back transaction
  * restores the issue tables to their state before it started.
  */
-function createFakeDb() {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.liveClock=false] database time moves with real time (development server)
+ * @param {Date} [options.clockBase=FAKE_DB_NOW] liveClock only: database time at creation
+ */
+function createFakeDb({ liveClock = false, clockBase = FAKE_DB_NOW } = {}) {
   let users = Object.values(DEMO_USERS);
   let categories = makeCategoryRows();
   let districts = makeDistrictRows();
@@ -299,7 +304,17 @@ function createFakeDb() {
   // Feature 4: database time for the workflow queries, and issue rows that
   // another transaction holds (FOR NO KEY UPDATE waits -> lock timeout;
   // SKIP LOCKED skips them).
-  let now = FAKE_DB_NOW;
+  let now = liveClock ? clockBase : FAKE_DB_NOW;
+  // liveClock (development server only): database time starts at clockBase
+  // (default FAKE_DB_NOW; the development server passes the real start time)
+  // and moves forward with real time, so durations such as resolved_at -
+  // created_at are real. Tests use the default (frozen at FAKE_DB_NOW).
+  const clockStartedAt = Date.now();
+  const tick = () => {
+    if (liveClock) now = new Date(clockBase.getTime() + (Date.now() - clockStartedAt));
+  };
+  // Time for writes that use the fixed FAKE_DB_NOW in tests.
+  const writeNow = () => (liveClock ? now : FAKE_DB_NOW);
   let lockedIssueIds = new Set();
   let lockedPaymentIds = new Set(); // payments held by another transaction
   let nextPaymentId = 45;
@@ -309,6 +324,7 @@ function createFakeDb() {
   /** Answers one query. inTransaction = sent through the transaction client. */
   async function handle(sql, params = [], inTransaction = false) {
     if (failing) throw new Error('connect ECONNREFUSED (simulated)');
+    tick();
     if (inTransaction && failTransactionOn && sql.includes(failTransactionOn)) {
       // Message contains SQL-like text so tests can check it never reaches the client.
       throw Object.assign(new Error('simulated failure: SELECT internal_detail FROM pg'), {
@@ -316,6 +332,103 @@ function createFakeDb() {
       });
     }
     if (/^\s*SELECT 1\s*$/.test(sql)) return { rows: [{ '?column?': 1 }] };
+    // Staff notification recipients (notification.service findStaffRecipients):
+    // params [departmentId, userIds, admins, excludeUserId]
+    if (sql.includes('AS staff_recipient_id')) {
+      const [departmentId, userIds, admins, excludeUserId] = params;
+      const rows = users
+        .filter((u) => {
+          if (!u.is_active || !['officer', 'supervisor', 'admin'].includes(u.role)) return false;
+          if (excludeUserId != null && sameId(u.id, excludeUserId)) return false;
+          const deptSupervisor =
+            departmentId != null &&
+            u.role === 'supervisor' &&
+            u.department_id != null &&
+            Number(u.department_id) === Number(departmentId) &&
+            departments.some((d) => d.id === Number(u.department_id) && d.is_active);
+          return deptSupervisor || userIds.some((id) => sameId(id, u.id)) || (admins && u.role === 'admin');
+        })
+        .sort((a, b) => Number(a.id) - Number(b.id))
+        .map((u) => ({ staff_recipient_id: u.id }));
+      return { rows };
+    }
+    // Admin "All issues" (routing.service listAllIssues):
+    // params [statuses, districtId, categoryId, departmentId, search, limit, offset]
+    if (sql.includes('AS admin_issue_total') || sql.includes('AS admin_issue_id')) {
+      const [statuses, districtId, categoryId, departmentId, search, limit, offset] = params;
+      const matching = tables.issues
+        .filter(
+          (i) =>
+            statuses.includes(i.status) &&
+            (districtId == null || Number(i.district_id) === districtId) &&
+            (categoryId == null || Number(i.category_id) === categoryId) &&
+            (departmentId == null || (i.department_id != null && Number(i.department_id) === departmentId)) &&
+            (search == null || i.reference_number.toUpperCase().includes(search.toUpperCase()))
+        )
+        .sort((a, b) => b.created_at - a.created_at || Number(b.id) - Number(a.id));
+      if (sql.includes('AS admin_issue_total')) return { rows: [{ admin_issue_total: matching.length }] };
+      return {
+        rows: matching.slice(offset, offset + limit).map((i) => {
+          const c = categories.find((row) => row.id === Number(i.category_id));
+          const d = districts.find((row) => row.id === Number(i.district_id));
+          const dep = departments.find((row) => i.department_id != null && row.id === Number(i.department_id));
+          const a = tables.assignments.find((row) => sameId(row.issue_id, i.id) && row.is_current);
+          const officer = a && a.officer_id != null ? users.find((u) => sameId(u.id, a.officer_id)) : null;
+          return {
+            admin_issue_id: i.id,
+            reference_number: i.reference_number,
+            status: i.status,
+            sub_status: i.sub_status ?? null,
+            description: i.description,
+            report_count: i.report_count,
+            is_sensitive: i.is_sensitive,
+            created_at: i.created_at,
+            sla_due_at: i.sla_due_at,
+            resolved_at: i.resolved_at ?? null,
+            closed_at: i.closed_at ?? null,
+            sla_evaluated_at: now,
+            category_id: c.id,
+            category_code: c.code,
+            category_name_en: c.name_en,
+            category_name_so: c.name_so,
+            district_id: d.id,
+            district_name: d.name,
+            district_city: d.city,
+            department_id: dep ? dep.id : null,
+            department_name: dep ? dep.name : null,
+            officer_id: a ? a.officer_id : null,
+            officer_name: officer ? officer.full_name : null,
+          };
+        }),
+      };
+    }
+    // Staff assignment timeline (status.service listAssignmentEvents): params [issueId]
+    if (sql.includes('AS assignment_event_id')) {
+      const nameOf = (id) => (id == null ? null : users.find((u) => sameId(u.id, id)) || null);
+      const rows = tables.assignments
+        .filter((a) => sameId(a.issue_id, params[0]))
+        .sort((a, b) => a.assigned_at - b.assigned_at || Number(a.id) - Number(b.id))
+        .map((a) => {
+          const dep = departments.find((d) => a.department_id != null && d.id === Number(a.department_id));
+          const actor = nameOf(a.assigned_by);
+          return {
+            assignment_event_id: a.id,
+            assignment_type: a.assignment_type,
+            reason: a.reason ?? null,
+            assigned_at: a.assigned_at,
+            department_id: a.department_id ?? null,
+            event_department_name: dep ? dep.name : null,
+            officer_id: a.officer_id ?? null,
+            event_officer_name: nameOf(a.officer_id)?.full_name ?? null,
+            supervisor_id: a.supervisor_id ?? null,
+            event_supervisor_name: nameOf(a.supervisor_id)?.full_name ?? null,
+            assigned_by: a.assigned_by ?? null,
+            event_actor_name: actor ? actor.full_name : null,
+            event_actor_role: actor ? actor.role : null,
+          };
+        });
+      return { rows };
+    }
     if (sql.includes('WHERE u.phone_number = $1')) {
       return { rows: users.filter((u) => u.phone_number === params[0]) };
     }
@@ -1288,7 +1401,7 @@ function createFakeDb() {
     if (sql.includes('AS similar_issue_id')) {
       const [categoryId, lng, lat, statuses, days, radius] = params;
       const point = { lng, lat };
-      const since = FAKE_DB_NOW.getTime() - days * 24 * 3600 * 1000;
+      const since = writeNow().getTime() - days * 24 * 3600 * 1000;
       const match = tables.issues
         .filter(
           (i) =>
@@ -1308,7 +1421,7 @@ function createFakeDb() {
     if (sql.includes('FOR UPDATE OF i')) {
       if (!inTransaction) throw new Error('Fake db: FOR UPDATE outside a transaction');
       const [issueId, categoryId, lng, lat, statuses, days, radius] = params;
-      const since = FAKE_DB_NOW.getTime() - days * 24 * 3600 * 1000;
+      const since = writeNow().getTime() - days * 24 * 3600 * 1000;
       const i = tables.issues.find((row) => sameId(row.id, issueId));
       const ok =
         i &&
@@ -1346,7 +1459,7 @@ function createFakeDb() {
     if (sql.includes('FROM issues i') && sql.includes('ST_DWithin')) {
       const [categoryId, lng, lat, citizenId, statuses, days, radius, limit] = params;
       const point = { lng, lat };
-      const since = FAKE_DB_NOW.getTime() - days * 24 * 3600 * 1000;
+      const since = writeNow().getTime() - days * 24 * 3600 * 1000;
       const rows = tables.issues
         .filter(
           (i) =>
@@ -1895,8 +2008,8 @@ function createFakeDb() {
       const ended = [];
       tables.assignments = tables.assignments.map((a) => {
         if (!sameId(a.issue_id, issueId) || !a.is_current) return a;
-        ended.push({ id: a.id });
-        return { ...a, is_current: false, ended_at: FAKE_DB_NOW };
+        ended.push({ id: a.id, officer_id: a.officer_id ?? null });
+        return { ...a, is_current: false, ended_at: writeNow() };
       });
       return { rows: ended, rowCount: ended.length };
     }
@@ -1936,7 +2049,7 @@ function createFakeDb() {
         assignment_type: type,
         reason,
         is_current: true,
-        assigned_at: FAKE_DB_NOW,
+        assigned_at: writeNow(),
         ended_at: null,
       };
       tables.assignments.push(row);
@@ -2113,8 +2226,8 @@ function createFakeDb() {
         is_sensitive: false,
         needs_supervisor_review: needsSupervisorReview,
         similar_issue_id: similarIssueId,
-        created_at: FAKE_DB_NOW,
-        sla_due_at: new Date(FAKE_DB_NOW.getTime() + hours * 3600 * 1000),
+        created_at: writeNow(),
+        sla_due_at: new Date(writeNow().getTime() + hours * 3600 * 1000),
       };
       tables.issues.push(row);
       const { reference_number, status, report_count, created_at, sla_due_at } = row;
@@ -2142,7 +2255,7 @@ function createFakeDb() {
         description,
         location: { lng, lat },
         is_original: /,\s*TRUE\)/.test(sql),
-        created_at: FAKE_DB_NOW,
+        created_at: writeNow(),
       };
       tables.issue_reports.push(row);
       return { rows: [{ id: row.id, created_at: row.created_at }] };
@@ -2320,6 +2433,7 @@ function createFakeDb() {
         description,
         location,
         is_original: true,
+        created_at: createdAt, // the original report is made when the issue is created
       };
       tables.issue_reports.push(report);
       for (let n = 0; n < photoCount; n++) {
@@ -2400,6 +2514,7 @@ function createFakeDb() {
         officerId = null,
         supervisorId = null,
         type = 'auto_route',
+        assignedAt = FAKE_DB_NOW,
       } = {}
     ) => {
       const row = {
@@ -2412,7 +2527,7 @@ function createFakeDb() {
         assignment_type: type,
         reason: null,
         is_current: true,
-        assigned_at: FAKE_DB_NOW,
+        assigned_at: assignedAt,
         ended_at: null,
       };
       tables.assignments.push(row);

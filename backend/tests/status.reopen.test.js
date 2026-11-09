@@ -319,7 +319,8 @@ describe('escalation edge cases', () => {
       supervisorId: null,
       endedAssignmentId: Number(assignment.id),
     });
-    expect(db.transactionQuery.mock.calls.some(([sql]) => sql.includes("r.code = 'supervisor'"))).toBe(false);
+    // No department-supervisor lookup (the admin notification query is a different statement).
+    expect(db.transactionQuery.mock.calls.some(([sql]) => sql.includes("r.code = 'supervisor'") && !sql.includes('AS staff_recipient_id'))).toBe(false);
 
     const queue = await request(app)
       .get('/api/admin/issues/unassigned')

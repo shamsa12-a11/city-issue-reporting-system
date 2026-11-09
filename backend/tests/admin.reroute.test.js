@@ -344,6 +344,8 @@ describe('POST /api/admin/issues/:id/reroute — success', () => {
       if (sql.includes('INSERT INTO assignments')) return 'insert_assignment';
       if (sql.includes('UPDATE issues')) return 'update_issue';
       if (sql.includes('INSERT INTO audit_logs')) return 'audit';
+      if (sql.includes('AS staff_recipient_id')) return 'staff_recipients';
+      if (sql.includes('INSERT INTO notifications')) return 'notifications';
       return sql;
     };
     expect(transactionSql().map(label)).toEqual([
@@ -353,6 +355,9 @@ describe('POST /api/admin/issues/:id/reroute — success', () => {
       'end_assignment',
       'insert_assignment',
       'update_issue',
+      // new department's supervisors (in-app), same transaction; this
+      // department has no supervisor, so nothing is inserted
+      'staff_recipients',
       'audit',
     ]);
     for (const [sql] of db.query.mock.calls) expect(sql).not.toMatch(/INSERT|UPDATE|DELETE/);

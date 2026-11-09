@@ -86,6 +86,8 @@ describe('GET /api/supervisor/escalations', () => {
         adminAlertedAt: null,
         adminAlertReason: null,
         adminAlertDelivered: null,
+        resolvedBeforeDetection: false,
+        actionRequired: true,
       },
     });
   });
@@ -107,6 +109,42 @@ describe('GET /api/supervisor/escalations', () => {
     expect(resolvedRow.slaEscalation).toMatchObject({ supervisorsNotified: false, adminAlertedAt: null });
     const actionedRow = all.body.issues.find((i) => i.id === Number(actioned.id));
     expect(actionedRow.slaEscalation).toMatchObject({ actionedAt: at(-2).toISOString(), actionedOnTime: true });
+  });
+
+  // Bug: resolved/closed issues marked after the fact showed a red
+  // "Action due" deadline although nobody was ever asked to act.
+  test('resolved before detection: flagged, no action required; open breach requires action until actioned', async () => {
+    const resolvedEarly = seed({ dueOffset: -2, status: 'resolved', resolvedAt: at(-1) });
+    const closedEarly = seed({ dueOffset: -5, status: 'closed', resolvedAt: at(-4), closedAt: at(-3) });
+    const open = seed({ dueOffset: -1 });
+    await run();
+
+    const all = await get('/api/admin/escalations?state=all', 'admin');
+    const esc = (issue) => all.body.issues.find((i) => i.id === Number(issue.id)).slaEscalation;
+    expect(esc(resolvedEarly)).toMatchObject({ resolvedBeforeDetection: true, actionRequired: false, supervisorsNotified: false });
+    expect(esc(closedEarly)).toMatchObject({ resolvedBeforeDetection: true, actionRequired: false });
+    expect(esc(open)).toMatchObject({ resolvedBeforeDetection: false, actionRequired: true });
+
+    // The issue page shows the same flags.
+    const page = await get(`/api/issues/${resolvedEarly.id}/status`, 'admin');
+    expect(page.body.issue.slaEscalation).toMatchObject({ resolvedBeforeDetection: true, actionRequired: false });
+
+    // Once a supervisor comments, the open issue no longer requires action.
+    const commented = await request(app)
+      .post(`/api/issues/${open.id}/comments`)
+      .set('Authorization', `Bearer ${tokenFor('supervisor')}`)
+      .send({ body: 'Team is on the way today' });
+    expect(commented.status).toBe(201);
+    const after = await get(`/api/issues/${open.id}/status`, 'supervisor');
+    expect(after.body.issue.slaEscalation).toMatchObject({ actionRequired: false, resolvedBeforeDetection: false });
+  });
+
+  // No-supervisor case: admins alerted at once; no supervisor deadline.
+  test('no responsible supervisor: admin alerted, not "resolved before detection", no supervisor action required', async () => {
+    const orphan = seed({ dueOffset: -1, departmentId: 3 }); // Hodan Water & Drainage: no supervisor
+    await run();
+    const res = await get(`/api/issues/${orphan.id}/status`, 'admin');
+    expect(res.body.issue.slaEscalation).toMatchObject({ adminAlertReason: 'no_supervisor', resolvedBeforeDetection: false, actionRequired: false });
   });
 
   test('an issue sent to the supervisor on a reopen escalation is listed for them; paging works', async () => {
@@ -206,6 +244,8 @@ describe('GET /api/issues/:id/status: slaEscalation', () => {
         adminAlertedAt: null,
         adminAlertReason: null,
         adminAlertDelivered: null,
+        resolvedBeforeDetection: false,
+        actionRequired: true,
       });
     }
 

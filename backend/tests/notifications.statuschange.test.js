@@ -87,11 +87,15 @@ describe('who is notified', () => {
     ]);
   });
 
-  test('staff are never notified by Feature 9', async () => {
+  test('staff never get Feature 9 status-change notifications or SMS (only their own in-app workflow notification)', async () => {
     const issue = linkedIssue();
     await request(app).post(`/api/issues/${issue.id}/assign`).set('Authorization', `Bearer ${tokenFor('supervisor')}`).send({ officerId: OFFICER_ID });
     const staff = [1, 2, OFFICER_ID];
-    expect(tables().notifications.filter((n) => staff.includes(Number(n.user_id)))).toHaveLength(0);
+    const staffRows = tables().notifications.filter((n) => staff.includes(Number(n.user_id)));
+    expect(staffRows.filter((n) => n.type === 'status_change')).toHaveLength(0);
+    // The assigned officer gets one in-app 'assignment' notification; the
+    // supervisor who assigned and the admin get nothing.
+    expect(staffRows.map((n) => [Number(n.user_id), n.type])).toEqual([[OFFICER_ID, 'assignment']]);
     expect(tables().sms_outbox.filter((m) => staff.includes(Number(m.user_id)))).toHaveLength(0);
   });
 
@@ -168,7 +172,7 @@ describe('every status change notifies (through applyStatusChange)', () => {
     expect(tables().sms_outbox).toHaveLength(0);
   });
 
-  test('creating an issue notifies nobody (N2)', async () => {
+  test('creating an issue notifies no citizen (N2); only the department supervisor in-app', async () => {
     const res = await request(app)
       .post('/api/issues')
       .set('Authorization', `Bearer ${tokenFor('citizen')}`)
@@ -178,7 +182,9 @@ describe('every status change notifies (through applyStatusChange)', () => {
       .field('longitude', '45.30')
       .attach('photos', IMAGES.jpeg, { filename: 'p.jpg', contentType: 'image/jpeg' });
     expect(res.status).toBe(201);
-    expect(tables().notifications).toHaveLength(0);
+    // No citizen notification and no SMS; the Hodan Public Works supervisor
+    // gets one in-app 'assignment' notification for the new issue.
+    expect(tables().notifications.map((n) => [Number(n.user_id), n.type])).toEqual([[2, 'assignment']]);
     expect(tables().sms_outbox).toHaveLength(0);
   });
 });

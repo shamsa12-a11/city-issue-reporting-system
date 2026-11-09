@@ -23,6 +23,7 @@ const AppError = require('../utils/AppError');
 const { recordAudit } = require('./audit.service');
 const { runIssueTransaction, OPEN_STATUSES } = require('./issue.service');
 const { toSla } = require('./sla');
+const { notifyStaff, staffMessages } = require('./notification.service');
 
 /** Statuses that can no longer be rerouted. */
 const CLOSED_STATUSES = ['resolved', 'closed'];
@@ -333,6 +334,99 @@ async function listUnassignedIssues({ limit, offset }) {
   };
 }
 
+/** Status filters of the Admin "All issues" list. */
+const ADMIN_ISSUE_STATUS_FILTERS = Object.freeze({
+  open: OPEN_STATUSES,
+  new: ['new'],
+  assigned: ['assigned'],
+  in_progress: ['in_progress'],
+  resolved: ['resolved'],
+  closed: ['closed'],
+  all: ['new', 'assigned', 'in_progress', 'resolved', 'closed'],
+});
+
+/**
+ * Normalizes a reference-number search ("125", "cit-000125", " CIT-000125 ")
+ * to the characters a reference number can contain, so it can be used inside
+ * ILIKE without wildcards from the user. Empty -> null (no search).
+ */
+function normalizeReferenceSearch(search) {
+  if (search == null) return null;
+  const cleaned = String(search).toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  return cleaned === '' ? null : cleaned;
+}
+
+/**
+ * Admin "All issues": every issue (sensitive included), newest first, with
+ * optional status / district / category / department filters and a
+ * reference-number search. Read-only: rerouting still goes through
+ * rerouteIssue() with all of its checks.
+ * @param {object} input
+ * @param {keyof ADMIN_ISSUE_STATUS_FILTERS} [input.status='all']
+ * @param {number} [input.districtId] @param {number} [input.categoryId] @param {number} [input.departmentId]
+ * @param {string} [input.search] reference number (or part of it)
+ */
+async function listAllIssues({ status = 'all', districtId = null, categoryId = null, departmentId = null, search = null, limit, offset }) {
+  const statuses = ADMIN_ISSUE_STATUS_FILTERS[status] || ADMIN_ISSUE_STATUS_FILTERS.all;
+  const where = `
+      WHERE i.status = ANY($1::text[])
+        AND ($2::int IS NULL OR i.district_id = $2::int)
+        AND ($3::int IS NULL OR i.category_id = $3::int)
+        AND ($4::int IS NULL OR i.department_id = $4::int)
+        AND ($5::text IS NULL OR i.reference_number ILIKE '%' || $5::text || '%')`;
+  const filters = [statuses, districtId, categoryId, departmentId, normalizeReferenceSearch(search)];
+  const {
+    rows: [{ admin_issue_total: total }],
+  } = await db.query(`SELECT count(*)::int AS admin_issue_total FROM issues i${where}`, filters);
+  const { rows } = await db.query(
+    `SELECT i.id AS admin_issue_id, i.reference_number, i.status, i.sub_status, i.description,
+            i.report_count, i.is_sensitive, i.created_at, i.sla_due_at, i.resolved_at, i.closed_at,
+            now() AS sla_evaluated_at,
+            c.id AS category_id, c.code AS category_code,
+            c.name_en AS category_name_en, c.name_so AS category_name_so,
+            d.id AS district_id, d.name AS district_name, d.city AS district_city,
+            dep.id AS department_id, dep.name AS department_name,
+            a.officer_id, o.full_name AS officer_name
+       FROM issues i
+       JOIN categories c ON c.id = i.category_id
+       JOIN districts d ON d.id = i.district_id
+       LEFT JOIN departments dep ON dep.id = i.department_id
+       LEFT JOIN assignments a ON a.issue_id = i.id AND a.is_current = TRUE
+       LEFT JOIN users o ON o.id = a.officer_id${where}
+      ORDER BY i.created_at DESC, i.id DESC
+      LIMIT $6 OFFSET $7`,
+    [...filters, limit, offset]
+  );
+  return {
+    issues: rows.map((row) => ({
+      id: Number(row.admin_issue_id),
+      referenceNumber: row.reference_number,
+      status: row.status,
+      subStatus: row.sub_status ?? null,
+      description: row.description,
+      reportCount: row.report_count,
+      isSensitive: row.is_sensitive,
+      category: toCategory(row),
+      district: toDistrict(row),
+      department: row.department_id == null ? null : { id: Number(row.department_id), name: row.department_name },
+      officer: row.officer_id == null ? null : { id: Number(row.officer_id), name: row.officer_name },
+      // Only open issues can be rerouted (same rule as rerouteIssue).
+      canReroute: OPEN_STATUSES.includes(row.status),
+      createdAt: row.created_at,
+      slaDueAt: row.sla_due_at,
+      sla: toSla({
+        status: row.status,
+        createdAt: row.created_at,
+        dueAt: row.sla_due_at,
+        resolvedAt: row.resolved_at,
+        closedAt: row.closed_at,
+        now: row.sla_evaluated_at,
+      }),
+    })),
+    pagination: { limit, offset, total },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Manual reroute
 // ---------------------------------------------------------------------------
@@ -391,7 +485,7 @@ async function rerouteIssue({ adminId, issueId, departmentId, reason, ipAddress 
               ended_at = now()
         WHERE issue_id = $1
           AND is_current = TRUE
-        RETURNING id`,
+        RETURNING id, officer_id`,
       [issue.id]
     );
 
@@ -411,6 +505,26 @@ async function rerouteIssue({ adminId, issueId, departmentId, reason, ipAddress 
         WHERE id = $1`,
       [issue.id, departmentId]
     );
+
+    // Staff notifications (same transaction): the new department's
+    // supervisors, and the officer who had the issue (if any).
+    await notifyStaff(client, {
+      issueId: issue.id,
+      type: 'assignment',
+      message: staffMessages.rerouted(issue.reference_number),
+      departmentId: Number(departmentId),
+      excludeUserId: adminId,
+    });
+    const previousOfficerId = ended[0] && ended[0].officer_id != null ? Number(ended[0].officer_id) : null;
+    if (previousOfficerId != null) {
+      await notifyStaff(client, {
+        issueId: issue.id,
+        type: 'assignment',
+        message: staffMessages.reroutedAway(issue.reference_number),
+        userIds: [previousOfficerId],
+        excludeUserId: adminId,
+      });
+    }
 
     await recordAudit(
       {
@@ -461,5 +575,7 @@ module.exports = {
   setRoutingRule,
   listDepartments,
   listUnassignedIssues,
+  listAllIssues,
+  ADMIN_ISSUE_STATUS_FILTERS,
   rerouteIssue,
 };

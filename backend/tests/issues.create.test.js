@@ -137,6 +137,7 @@ describe('POST /api/issues — success', () => {
       if (sql.includes('AS similar_issue_id')) return 'review_check';
       if (sql.includes('ST_DWithin(i.location, p.point')) return 'duplicate_recheck';
       if (sql.includes('FROM routing_rules rr')) return 'routing_locked';
+      if (sql.includes('AS staff_recipient_id')) return 'staff_recipients';
       return sql.match(/INSERT INTO (\w+)/)[1];
     });
     expect(order).toEqual([
@@ -152,6 +153,9 @@ describe('POST /api/issues — success', () => {
       'photos',
       'status_history',
       'issue_subscriptions',
+      // the department supervisors' in-app notification, same transaction
+      'staff_recipients',
+      'notifications',
     ]);
     // No write goes through the pool (outside the transaction).
     for (const [sql] of db.query.mock.calls) expect(sql).not.toMatch(/INSERT|UPDATE|DELETE/);

@@ -76,7 +76,11 @@ describe('GET /api/notifications', () => {
     await issueWithTwoChanges();
     for (const as of ['officer', 'supervisor', 'admin']) {
       const res = await api('get', '/api/notifications', as);
-      expect(res.body).toEqual({ notifications: [], unreadCount: 0, pagination: { limit: 20, offset: 0, total: 0 } });
+      expect(res.status).toBe(200);
+      // None of the citizen's status-change notifications reach staff. The
+      // assigned officer only sees their own 'assignment' notification.
+      expect(res.body.notifications.filter((n) => n.type === 'status_change')).toEqual([]);
+      expect(res.body.notifications.map((n) => n.type)).toEqual(as === 'officer' ? ['assignment'] : []);
     }
   });
 

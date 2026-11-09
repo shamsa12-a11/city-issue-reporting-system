@@ -54,7 +54,12 @@ test('a replacement provider receives the same message; nothing else writes SMS'
     },
   ]);
   expect(db.getTables().sms_outbox).toEqual([]);
-  expect(db.getTables().notifications).toHaveLength(1); // in-app is independent of the SMS provider
+  // in-app is independent of the SMS provider: the citizen's status change,
+  // plus the officer's in-app 'assignment' notification (staff never get SMS)
+  expect(db.getTables().notifications.map((n) => [Number(n.user_id), n.type])).toEqual([
+    [11, 'status_change'],
+    [6, 'assignment'],
+  ]);
 });
 
 test('a provider failure rolls back the status change (same transaction)', async () => {

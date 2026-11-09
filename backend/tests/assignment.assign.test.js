@@ -114,12 +114,14 @@ describe('assign an officer to a new issue', () => {
       if (sql.includes('UPDATE issues')) return 'status_update';
       if (sql.includes('INSERT INTO audit_logs')) return 'audit';
       if (sql.includes('AS recipient_language')) return 'recipients';
+      if (sql.includes('AS staff_recipient_id')) return 'staff_recipients';
       if (sql.includes('INSERT INTO notifications')) return 'notifications';
       if (sql.includes('INSERT INTO sms_outbox')) return 'sms';
       return sql;
     };
     // + Feature 9: citizen notifications right after the status update, same transaction.
-    expect(transactionSql().map(label)).toEqual(['lock_timeout', 'lock_issue', 'context', 'lock_officer', 'end_assignment', 'insert_assignment', 'history', 'status_update', 'recipients', 'notifications', 'sms', 'audit']);
+    // + staff: the assigned officer's in-app notification, before the audit row.
+    expect(transactionSql().map(label)).toEqual(['lock_timeout', 'lock_issue', 'context', 'lock_officer', 'end_assignment', 'insert_assignment', 'history', 'status_update', 'recipients', 'notifications', 'sms', 'staff_recipients', 'notifications', 'audit']);
     expect(transactionSql().find((s) => s.includes('AS reopen_open'))).toMatch(/FOR NO KEY UPDATE/);
     expect(transactionSql().find((s) => s.includes('AS officer_role'))).toMatch(/FOR SHARE OF u/);
     for (const [s] of db.query.mock.calls) expect(s).not.toMatch(/INSERT|UPDATE|DELETE/);

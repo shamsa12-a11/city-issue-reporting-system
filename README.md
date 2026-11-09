@@ -34,7 +34,7 @@ departments assign, fix and track them. Full requirements:
 | Citizen "My reports", fix rating; supervisor duplicate-review queue; staff issue details | Done (backend API) |
 | Simulated SMS outbox behind a replaceable SMS adapter (`src/sms/providers.js`) | Done |
 | GitHub Actions CI (`.github/workflows/backend-ci.yml`: `npm ci` + `npm test`, Node 20 and 22) | Configured (first run happens on GitHub after a push) |
-| Frontend (React) | Not started |
+| Frontend (React + Vite): public pages, citizen workspace, officer / supervisor / admin workspaces, maps and analytics, simulated payments, Somali and English — see [frontend/README.md](frontend/README.md) and [frontend/REQUIREMENTS_COVERAGE.md](frontend/REQUIREMENTS_COVERAGE.md) | Done (tested in the browser against the backend app on its test database; live Supabase run pending) |
 
 ## Technology stack
 
@@ -84,7 +84,36 @@ Security notes:
   takes the same time for both, so registered numbers cannot be discovered.
 - Errors never expose stack traces or SQL to the client.
 
-## Setup on a fresh computer
+## Local development: one command
+
+Requirements: Node.js 20 or newer. No database is needed.
+
+```bash
+npm install --prefix backend
+npm install --prefix frontend
+npm run dev          # from the project root
+```
+
+This starts both parts in one terminal, with `[backend]` and `[frontend]` log
+prefixes. Open <http://127.0.0.1:5173>. Press **Ctrl+C** to stop both.
+
+- The backend runs on `127.0.0.1:5000` with an **in-memory database** and
+  sample data (`backend/scripts/dev-memory-server.js`). It never reads
+  `backend/.env`, never loads the PostgreSQL client, never connects to
+  Supabase and never starts the background jobs. Data is lost when it stops.
+- The frontend (Vite) runs on `127.0.0.1:5173` and proxies `/api` and
+  `/uploads` to that backend, only after checking it answers as in-memory.
+- It refuses to start if port 5000 or 5173 is already in use, if
+  `NODE_ENV=production`, or if `VITE_API_ORIGIN` is set. If either process
+  stops, the other is stopped too.
+- Demo logins (password `CityDemo#2026`): admin `+252610000001`, supervisor
+  `+252610000101`, officer `+252610000201`, citizen `+252610000301`.
+
+Other root scripts: `npm run dev:check` (runs the safety checks only, starts
+nothing), `npm test` (backend tests), `npm run build` (frontend build).
+`npm run dev` inside `backend/` or `frontend/` still works on its own.
+
+## Setup on a fresh computer (real database)
 
 Requirements: Node.js 20 or newer, and a Supabase project.
 
@@ -105,13 +134,22 @@ cp .env.example .env      # Windows PowerShell: Copy-Item .env.example .env
 Edit `backend/.env` and set at least `DATABASE_URL` and `JWT_SECRET`, then:
 
 ```bash
-npm run dev     # development server with auto-restart (http://localhost:5000)
-npm start       # same, without auto-restart
+npm start       # the real server: uses backend/.env and the database, starts the background jobs
+npm run dev     # in-memory development server instead (ignores .env, see above)
 npm test        # run all tests (no database needed)
 ```
 
-Check it works: open <http://localhost:5000/api/health> — it should show
-`"database": "up"`.
+Check `npm start` works: open <http://localhost:5000/api/health> — it should
+show `"database": "up"`.
+
+### 3. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev     # http://localhost:5173 (proxies /api and /uploads to the backend)
+npm run build   # production build in frontend/dist
+```
 
 ## Environment variables
 
@@ -1375,7 +1413,8 @@ Photo tests write to a temporary folder, never to `backend/uploads`.
 - The backend API of Features 1–13 and the common requirements is built and
   tested against an in-memory fake database (see
   [backend/REQUIREMENTS_COVERAGE.md](backend/REQUIREMENTS_COVERAGE.md)). The
-  frontend is not started.
+  frontend covers every role. There is no audit-log page (the backend has
+  no endpoint to read the audit log).
 - Features 6–13, payments, admin management and the audit-gap endpoints have
   not yet been verified against the live Supabase database (SQL, PostGIS,
   locking and concurrency); see the coverage report for the list.

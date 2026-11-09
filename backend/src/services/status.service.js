@@ -39,7 +39,7 @@ const { recordAudit } = require('./audit.service');
 const { runIssueTransaction } = require('./issue.service');
 const { withStoredPhotos, getPhotoUrl } = require('../storage/photoStorage');
 const { toSla } = require('./sla');
-const { notifyStatusChange } = require('./notification.service');
+const { notifyStatusChange, notifyStaff, staffMessages } = require('./notification.service');
 const { getSlaEscalation } = require('./escalation.service');
 
 const STATUSES = Object.freeze(['new', 'assigned', 'in_progress', 'resolved', 'closed']);
@@ -438,8 +438,46 @@ async function getIssueStatus({ user, issueId }) {
     if (user.role === 'admin') result.issue.escalation = await findLatestEscalation(issue.id);
     // Feature 6: SLA escalation (staff only; separate from the admin-only reopen `escalation`).
     result.issue.slaEscalation = await getSlaEscalation(db, issue.id);
+    // Staff only: routing / assignment / reassignment / reroute events. They
+    // do not change the status, so they have no status_history row.
+    result.assignmentEvents = await listAssignmentEvents(issue.id);
   }
   return result;
+}
+
+/**
+ * Every assignment row of the issue, oldest first (staff only: names of
+ * officers and supervisors are never shown to citizens).
+ */
+async function listAssignmentEvents(issueId) {
+  const { rows } = await db.query(
+    `SELECT a.id AS assignment_event_id, a.assignment_type, a.reason, a.assigned_at,
+            a.department_id, dep.name AS event_department_name,
+            a.officer_id, o.full_name AS event_officer_name,
+            a.supervisor_id, s.full_name AS event_supervisor_name,
+            a.assigned_by, b.full_name AS event_actor_name, br.code AS event_actor_role
+       FROM assignments a
+       LEFT JOIN departments dep ON dep.id = a.department_id
+       LEFT JOIN users o ON o.id = a.officer_id
+       LEFT JOIN users s ON s.id = a.supervisor_id
+       LEFT JOIN users b ON b.id = a.assigned_by
+       LEFT JOIN roles br ON br.id = b.role_id
+      WHERE a.issue_id = $1
+      ORDER BY a.assigned_at, a.id`,
+    [issueId]
+  );
+  const person = (id, name) => (id == null ? null : { id: Number(id), name: name ?? null });
+  return rows.map((row) => ({
+    id: Number(row.assignment_event_id),
+    type: row.assignment_type,
+    reason: row.reason ?? null,
+    createdAt: row.assigned_at,
+    department: row.department_id == null ? null : { id: Number(row.department_id), name: row.event_department_name ?? null },
+    officer: person(row.officer_id, row.event_officer_name),
+    supervisor: person(row.supervisor_id, row.event_supervisor_name),
+    // null = automatic (routing rules / system)
+    assignedBy: row.assigned_by == null ? null : { id: Number(row.assigned_by), name: row.event_actor_name ?? null, role: row.event_actor_role ?? null },
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +728,24 @@ async function escalateReopen(client, { issue, reopenCount, user, reason }) {
     route = 'admin_unassigned';
   }
 
+  // Staff notification (same transaction): the supervisor it was sent to,
+  // or every admin when it went to the Unassigned queue.
+  if (route === 'supervisor') {
+    await notifyStaff(client, {
+      issueId: issue.id,
+      type: 'assignment',
+      message: staffMessages.reopenedToSupervisor(issue.reference_number, reopenCount),
+      userIds: [supervisorId],
+    });
+  } else {
+    await notifyStaff(client, {
+      issueId: issue.id,
+      type: 'assignment',
+      message: staffMessages.reopenedUnassigned(issue.reference_number),
+      admins: true,
+    });
+  }
+
   await recordAudit(
     {
       actorId: user.id,
@@ -741,6 +797,14 @@ async function reopenIssue({ user, issueId, comment, files }) {
       } else if (ctx.officer_id == null) {
         await escalateReopen(client, { issue, reopenCount, user, reason: 'no_assigned_officer' });
         toStatus = 'new';
+      } else {
+        // Back to the current officer: tell them (same transaction).
+        await notifyStaff(client, {
+          issueId: issue.id,
+          type: 'assignment',
+          message: staffMessages.reopenedToOfficer(issue.reference_number),
+          userIds: [Number(ctx.officer_id)],
+        });
       }
 
       let photos;

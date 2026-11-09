@@ -64,6 +64,16 @@ async function listUnassignedIssues(req, res) {
 }
 
 /**
+ * GET /api/admin/issues?status=&districtId=&categoryId=&departmentId=&search=&limit=&offset=
+ * Every issue (sensitive included), newest first. search = reference number.
+ * 200: { issues: [...], pagination: { limit, offset, total } }
+ */
+async function listAllIssues(req, res) {
+  const { status = 'all', districtId = null, categoryId = null, departmentId = null, search = null, limit = DEFAULT_PAGE_SIZE, offset = 0 } = validQuery(req);
+  res.json(await routingService.listAllIssues({ status, districtId, categoryId, departmentId, search, limit, offset }));
+}
+
+/**
  * POST /api/admin/issues/:id/reroute   body: { departmentId, reason }
  * 200: { issue: { id, referenceNumber, status, previousDepartment, department },
  *        assignment: { id, type: 'manual_reroute', reason, assignedAt } }
@@ -111,6 +121,7 @@ module.exports = {
   setRoutingRule,
   listDepartments,
   listUnassignedIssues,
+  listAllIssues,
   rerouteIssue,
   listSlas,
   setSla,

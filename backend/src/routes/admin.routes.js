@@ -9,6 +9,8 @@
  *   PUT  /routing-rules/:categoryId/:districtId  create or replace one rule
  *   GET  /departments?districtId=                departments (optionally one district)
  *   GET  /issues/unassigned?limit=&offset=       open issues without a department
+ *   GET  /issues?status=&districtId=&categoryId=&departmentId=&search=&limit=&offset=
+ *                                                every issue (Admin All issues; search = reference)
  *   POST /issues/:id/reroute                     manual reroute with a reason
  *   GET  /slas                                   SLA (resolution hours) of every category
  *   PUT  /slas/:categoryId                       set one category's SLA (new issues only)
@@ -31,7 +33,8 @@ const { MAX_RESOLUTION_HOURS } = require('../services/sla.service');
 const escalationController = require('../controllers/escalation.controller');
 const publicController = require('../controllers/public.controller');
 const { ESCALATION_STATES } = require('../services/escalation.service');
-const { pageRules, queryEnum, heatmapRules } = require('./validators');
+const { pageRules, queryEnum, queryId, heatmapRules } = require('./validators');
+const { ADMIN_ISSUE_STATUS_FILTERS } = require('../services/routing.service');
 const communityController = require('../controllers/community.controller');
 const reportController = require('../controllers/report.controller');
 const managementController = require('../controllers/adminManagement.controller');
@@ -127,6 +130,25 @@ router.get(
   ]),
   validate,
   adminController.listUnassignedIssues
+);
+
+router.get(
+  '/issues',
+  exact([
+    queryEnum('status', Object.keys(ADMIN_ISSUE_STATUS_FILTERS)),
+    queryId('districtId', 'District'),
+    queryId('categoryId', 'Category'),
+    queryId('departmentId', 'Department'),
+    query('search')
+      .optional()
+      .custom((v) => typeof v === 'string' && v.length <= 30)
+      .withMessage('search must be text of at most 30 characters')
+      .bail()
+      .trim(),
+    ...pageRules(),
+  ]),
+  validate,
+  adminController.listAllIssues
 );
 
 router.post(
